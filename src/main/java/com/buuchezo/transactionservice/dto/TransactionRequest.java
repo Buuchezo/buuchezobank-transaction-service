@@ -18,7 +18,7 @@ import java.math.BigDecimal;
 @AllArgsConstructor
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @JsonIgnoreProperties(ignoreUnknown = true)
-public class TransactionRequestDto {
+public class TransactionRequest {
 
     private String fromAccountNumber;
 

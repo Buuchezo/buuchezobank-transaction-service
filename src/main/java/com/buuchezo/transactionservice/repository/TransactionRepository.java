@@ -14,16 +14,16 @@ public interface TransactionRepository extends JpaRepository<Transaction, Long> 
     Optional<Transaction> findByReference(String reference);
 
     @Query("SELECT t FROM Transaction t WHERE t.fromAccountNumber = :accountNumber OR t.toAccountNumber = :accountNumber ORDER BY t.createdAt DESC")
-    List<Transaction> findallByAccountNumber(@Param("accountNumber") String accountNumber);
+    List<Transaction> findAllByAccountNumber(@Param("accountNumber") String accountNumber);
 
     @Query("SELECT t FROM Transaction t WHERE t.fromAccountNumber = :accountNumber OR t.toAccountNumber = :accountNumber AND t.createdAt BETWEEN :start AND :end ORDER BY t.createdAt DESC")
-    List<Transaction> findallByAccountNumberAndDateRange(
+    List<Transaction> findAllAccountNumberAndDateRange(
             @Param("accountNumber") String accountNumber
             , @Param("start") LocalDateTime start
             , @Param("end") LocalDateTime end
     );
 
-    List<Transaction> findallByFromAccountNumber(String fromAccountNumber);
+    List<Transaction> findByFromAccountNumber(String fromAccountNumber);
 
     List<Transaction> findByToAccountNumber(String toAccountNumber);
 }

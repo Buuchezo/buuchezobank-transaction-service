@@ -2,6 +2,6 @@ package com.buuchezo.transactionservice.enums;
 
 public enum AccountStatus {
     ACTIVE,
-    INACTIVE,
+    CLOSED,
     FROZEN
 }
