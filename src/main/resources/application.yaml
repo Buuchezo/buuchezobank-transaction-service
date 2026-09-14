@@ -4,7 +4,7 @@ spring:
 
   datasource:
     url: jdbc:postgresql://database-buuchezo.czoeaksgses7.eu-north-1.rds.amazonaws.com:5432/buuchezobank_transaction_db #POSTGRESQL DATABASE CONNECTION
-    username: postgres
+    username: ${DB_USERNAME}
     password: ${DB_PASSWORD}
 
   jpa:
