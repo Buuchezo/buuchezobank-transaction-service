@@ -51,7 +51,7 @@ public class TransactionServiceImpl implements TransactionService {
 
         Transaction deposit = Transaction.builder()
                 .reference("DEP" + UUID.randomUUID().toString().substring(0, 8))
-                .fromAccountNumber(request.getFromAccountNumber())
+                .fromAccountNumber("VULT")
                 .fromBankCode("BUUCHEZO")
                 .currency(Currency.USD)
                 .toAccountNumber(request.getToAccountNumber())
@@ -67,7 +67,7 @@ public class TransactionServiceImpl implements TransactionService {
 
         Transaction savedTransaction = transactionRepository.save(deposit);
 
-        //notify the account service to update the user account balance
+        // Notify account service to update the user's account balance
         BalanceUpdateEvent balanceUpdateEvent = BalanceUpdateEvent.builder()
                 .accountNumber(request.getToAccountNumber())
                 .amount(request.getAmount())
@@ -83,7 +83,8 @@ public class TransactionServiceImpl implements TransactionService {
         return new ApiResponse<>(
                 201,
                 "Deposit Successful",
-                modelMapper.map(savedTransaction, TransactionDto.class));
+                modelMapper.map(savedTransaction, TransactionDto.class)
+        );
     }
 
     @Override
