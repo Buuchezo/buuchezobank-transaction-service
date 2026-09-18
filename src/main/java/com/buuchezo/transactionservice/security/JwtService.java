@@ -26,12 +26,11 @@ public class JwtService {
         return extractClaims(token, Claims::getSubject);
     }
 
-
     public List<SimpleGrantedAuthority> extractAuthorities(String token) {
 
         List<?> roles = extractClaims(
                 token,
-                claims -> claims.get("roles", List.class)
+                claims -> claims.get("role", List.class)
         );
 
         if (roles == null || roles.isEmpty()) {
@@ -41,7 +40,7 @@ public class JwtService {
         return roles.stream()
                 .filter(String.class::isInstance)
                 .map(String.class::cast)
-                .map(SimpleGrantedAuthority::new)
+                .map(role -> new SimpleGrantedAuthority("ROLE_" + role))
                 .toList();
     }
 
