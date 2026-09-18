@@ -13,7 +13,7 @@ import org.springframework.web.bind.annotation.*;
 import java.util.List;
 
 @RestController
-@RequestMapping("/admin/transactions/admin")
+@RequestMapping("/api/transactions/admin")
 @RequiredArgsConstructor
 @PreAuthorize("hasRole('ADMIN')")
 public class AdminTransactionController {
@@ -25,14 +25,21 @@ public class AdminTransactionController {
             @Valid
             @RequestBody
             TransactionRequest request) {
-        return ResponseEntity.ok(transactionService.deposit(request));
+
+        return ResponseEntity.ok(
+                transactionService.deposit(request)
+        );
     }
 
     @GetMapping("/history/{accountNumber}")
     public ResponseEntity<ApiResponse<List<TransactionDto>>> getTransactionByReference(
             @PathVariable String accountNumber
     ) {
-        return ResponseEntity.ok(transactionService.getAllTransactionHistoryOfAnAccountNumber(accountNumber));
 
+        return ResponseEntity.ok(
+                transactionService.getAllTransactionHistoryOfAnAccountNumber(
+                        accountNumber
+                )
+        );
     }
 }
