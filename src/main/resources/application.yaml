@@ -2,6 +2,10 @@ spring:
   application:
     name: transaction-service
 
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.security.autoconfigure.UserDetailsServiceAutoConfiguration
+
   datasource:
     url: ${DB_URL_TRANSACTION} #POSTGRESQL DATABASE CONNECTION
     username: ${DB_USERNAME}
@@ -39,7 +43,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: "*"
+        include: health,info
 
 #Eureka
 eureka:
