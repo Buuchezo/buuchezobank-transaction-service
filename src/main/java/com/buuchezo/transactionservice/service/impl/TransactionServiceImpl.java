@@ -79,6 +79,12 @@ public class TransactionServiceImpl implements TransactionService {
                 .reference(savedTransaction.getReference())
                 .build();
 
+        log.info(
+                "OUTGOING BALANCE EVENT: type={}, direction={}, reference={}",
+                balanceUpdateEvent.getTransactionType(),
+                balanceUpdateEvent.getTransactionDirection(),
+                balanceUpdateEvent.getReference()
+        );
         transactionEventPublisher.sendBalanceUpdate(balanceUpdateEvent);
 
         return new ApiResponse<>(
