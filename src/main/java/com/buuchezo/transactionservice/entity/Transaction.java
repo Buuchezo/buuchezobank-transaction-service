@@ -26,7 +26,7 @@ public class Transaction {
 
     private String reference;
 
-    @Column(nullable = false)
+
     private String fromAccountNumber;
 
     private String fromBankCode;
