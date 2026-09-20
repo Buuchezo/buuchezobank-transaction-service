@@ -1,6 +1,5 @@
 package com.buuchezo.transactionservice.service.impl;
 
-
 import com.buuchezo.transactionservice.dto.AccountDto;
 import com.buuchezo.transactionservice.dto.ApiResponse;
 import com.buuchezo.transactionservice.dto.TransactionDto;
@@ -22,12 +21,16 @@ import com.buuchezo.transactionservice.service.TransactionService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.modelmapper.ModelMapper;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.List;
 import java.util.UUID;
 
@@ -36,12 +39,15 @@ import java.util.UUID;
 @Slf4j
 public class TransactionServiceImpl implements TransactionService {
 
-
     private final TransactionRepository transactionRepository;
     private final AccountFeignClient accountFeignClient;
     private final ModelMapper modelMapper;
     private final TransactionEventPublisher transactionEventPublisher;
 
+
+    // =========================================================
+    // DEPOSIT
+    // =========================================================
 
     @Override
     @Transactional
@@ -50,12 +56,17 @@ public class TransactionServiceImpl implements TransactionService {
         fetchAndValidateAccount(request.getToAccountNumber());
 
         Transaction deposit = Transaction.builder()
-                .reference("DEP" + UUID.randomUUID().toString().substring(0, 8))
+                .reference(
+                        "DEP" +
+                                UUID.randomUUID()
+                                        .toString()
+                                        .substring(0, 8)
+                )
                 .fromAccountNumber(request.getFromAccountNumber())
-                .fromBankCode("BUUCHEZO")
+                .fromBankCode("BUCHEZO")
                 .currency(Currency.USD)
                 .toAccountNumber(request.getToAccountNumber())
-                .toBankCode("BUUCHEZO")
+                .toBankCode("BUCHEZO")
                 .amount(request.getAmount())
                 .transactionDirection(TransactionDirection.CREDIT)
                 .channel(Channel.API)
@@ -65,87 +76,105 @@ public class TransactionServiceImpl implements TransactionService {
                 .createdAt(LocalDateTime.now())
                 .build();
 
-        Transaction savedTransaction = transactionRepository.save(deposit);
+        Transaction savedTransaction =
+                transactionRepository.save(deposit);
 
-        // Notify the account service to update the user account balance
-        BalanceUpdateEvent balanceUpdateEvent = BalanceUpdateEvent.builder()
-                .accountNumber(request.getToAccountNumber())
-                .amount(request.getAmount())
-                .currency(Currency.USD)
-                .description(request.getDescription())
-                .transactionDirection(TransactionDirection.CREDIT)
-                .transactionType(TransactionType.DEPOSIT)
-                .transactionStatus(TransactionStatus.SUCCESS)
-                .reference(savedTransaction.getReference())
-                .build();
+        /*
+         * Every balance event gets its own unique eventId.
+         */
+        BalanceUpdateEvent balanceUpdateEvent =
+                BalanceUpdateEvent.builder()
+                        .eventId(UUID.randomUUID())
+                        .accountNumber(
+                                request.getToAccountNumber()
+                        )
+                        .amount(request.getAmount())
+                        .currency(Currency.USD)
+                        .description(request.getDescription())
+                        .transactionDirection(
+                                TransactionDirection.CREDIT
+                        )
+                        .transactionType(
+                                TransactionType.DEPOSIT
+                        )
+                        .transactionStatus(
+                                TransactionStatus.SUCCESS
+                        )
+                        .reference(
+                                savedTransaction.getReference()
+                        )
+                        .build();
 
         log.info(
-                "OUTGOING BALANCE EVENT: type={}, direction={}, reference={}",
+                "OUTGOING BALANCE EVENT: eventId={}, type={}, direction={}, reference={}",
+                balanceUpdateEvent.getEventId(),
                 balanceUpdateEvent.getTransactionType(),
                 balanceUpdateEvent.getTransactionDirection(),
                 balanceUpdateEvent.getReference()
         );
-        transactionEventPublisher.sendBalanceUpdate(balanceUpdateEvent);
+
+        transactionEventPublisher.sendBalanceUpdate(
+                balanceUpdateEvent
+        );
 
         return new ApiResponse<>(
                 201,
                 "Deposit Successful",
-                modelMapper.map(savedTransaction, TransactionDto.class)
+                modelMapper.map(
+                        savedTransaction,
+                        TransactionDto.class
+                )
         );
     }
 
 
+    // =========================================================
+    // TRANSFER
+    // =========================================================
+
     @Override
-    public ApiResponse<TransactionDto> transfer(TransactionRequest request) {
+    @Transactional
+    public ApiResponse<TransactionDto> transfer(
+            TransactionRequest request
+    ) {
 
         if (request.getFromAccountNumber() == null ||
-                request.getFromAccountNumber().isEmpty()) {
-
-            throw new BadRequestException("From Account is Needed");
-        }
-
-        AccountDto sourceAccount =
-                fetchAndValidateAccount(request.getFromAccountNumber());
-
-
-        String loggedInUserEmail = null;
-
-        Authentication authentication =
-                SecurityContextHolder.getContext().getAuthentication();
-
-        if (authentication != null &&
-                authentication.isAuthenticated()) {
-
-            loggedInUserEmail = authentication.getName();
-        }
-
-        log.info("Auth email is: {}", loggedInUserEmail);
-        log.info("Account email is: {}", sourceAccount.getOwnerEmail());
-
-
-        if (!sourceAccount.getOwnerEmail().equals(loggedInUserEmail)) {
+                request.getFromAccountNumber().isBlank()) {
 
             throw new BadRequestException(
-                    "Access Denied: You are not authorized to perform a transfer on behalf of another person"
+                    "From Account is Needed"
             );
         }
 
+        AccountDto sourceAccount =
+                fetchAndValidateAccount(
+                        request.getFromAccountNumber()
+                );
 
-        if (sourceAccount.getAccountStatus() != AccountStatus.ACTIVE) {
+        validateAccountOwnership(sourceAccount);
+
+        if (sourceAccount.getAccountStatus()
+                != AccountStatus.ACTIVE) {
 
             throw new BadRequestException(
                     "Transaction Failed: Your account is inactive, please contact customer support"
             );
         }
 
+        if (sourceAccount.getBalance() == null) {
 
-        if (sourceAccount.getBalance().compareTo(request.getAmount()) < 0) {
+            throw new BadRequestException(
+                    "Transaction Failed: Account balance is unavailable"
+            );
+        }
+
+        if (sourceAccount.getBalance()
+                .compareTo(request.getAmount()) < 0) {
 
             throw new BadRequestException(
                     "Insufficient Account Balance"
             );
         }
-
 
         if (request.getFromAccountNumber()
                 .equals(request.getToAccountNumber())) {
@@ -155,262 +184,322 @@ public class TransactionServiceImpl implements TransactionService {
             );
         }
 
+        fetchAndValidateAccount(
+                request.getToAccountNumber()
+        );
 
-        // Validate the destination bank account
-        fetchAndValidateAccount(request.getToAccountNumber());
-
-
-        Transaction transferTnx = Transaction.builder()
-                .reference("TRF" + UUID.randomUUID().toString().substring(0, 8))
-                .fromAccountNumber(request.getFromAccountNumber())
-                .fromBankCode("BUUCHEZO")
-                .currency(Currency.USD)
-                .toAccountNumber(request.getToAccountNumber())
-                .toBankCode("BUUCHEZO")
-                .amount(request.getAmount())
-                .channel(Channel.API)
-                .description(request.getDescription())
-                .transactionType(TransactionType.TRANSFER)
-                .transactionStatus(TransactionStatus.SUCCESS)
-                .createdAt(LocalDateTime.now())
-                .build();
-
+        Transaction transferTransaction =
+                Transaction.builder()
+                        .reference(
+                                "TRF" +
+                                        UUID.randomUUID()
+                                                .toString()
+                                                .substring(0, 8)
+                        )
+                        .fromAccountNumber(
+                                request.getFromAccountNumber()
+                        )
+                        .fromBankCode("BUCHEZO")
+                        .currency(Currency.USD)
+                        .toAccountNumber(
+                                request.getToAccountNumber()
+                        )
+                        .toBankCode("BUCHEZO")
+                        .amount(request.getAmount())
+                        .channel(Channel.API)
+                        .description(request.getDescription())
+                        .transactionType(
+                                TransactionType.TRANSFER
+                        )
+                        .transactionStatus(
+                                TransactionStatus.SUCCESS
+                        )
+                        .createdAt(LocalDateTime.now())
+                        .build();
 
         Transaction savedTransaction =
-                transactionRepository.save(transferTnx);
+                transactionRepository.save(
+                        transferTransaction
+                );
 
 
-        // Notify account service to DEBIT the sender
-        transactionEventPublisher.sendBalanceUpdate(
+        /*
+         * IMPORTANT:
+         *
+         * A transfer creates TWO balance events.
+         *
+         * Event 1:
+         * Sender gets DEBITED.
+         *
+         * Event 2:
+         * Receiver gets CREDITED.
+         *
+         * Therefore they MUST have different event IDs.
+         */
+
+        UUID debitEventId = UUID.randomUUID();
+        UUID creditEventId = UUID.randomUUID();
+
+
+        // -----------------------------------------------------
+        // DEBIT SENDER
+        // -----------------------------------------------------
+
+        BalanceUpdateEvent debitEvent =
                 BalanceUpdateEvent.builder()
-                        .accountNumber(request.getFromAccountNumber())
+                        .eventId(debitEventId)
+                        .accountNumber(
+                                request.getFromAccountNumber()
+                        )
                         .amount(request.getAmount())
                         .currency(Currency.USD)
                         .description(request.getDescription())
-                        .transactionDirection(TransactionDirection.DEBIT)
-                        .transactionType(TransactionType.TRANSFER)
-                        .transactionStatus(TransactionStatus.SUCCESS)
-                        .reference(savedTransaction.getReference())
-                        .build()
+                        .transactionDirection(
+                                TransactionDirection.DEBIT
+                        )
+                        .transactionType(
+                                TransactionType.TRANSFER
+                        )
+                        .transactionStatus(
+                                TransactionStatus.SUCCESS
+                        )
+                        .reference(
+                                savedTransaction.getReference()
+                        )
+                        .build();
+
+        log.info(
+                "OUTGOING DEBIT EVENT: eventId={}, account={}, reference={}",
+                debitEvent.getEventId(),
+                debitEvent.getAccountNumber(),
+                debitEvent.getReference()
+        );
+
+        transactionEventPublisher.sendBalanceUpdate(
+                debitEvent
         );
 
 
-        // Notify account service to CREDIT the receiver
-        transactionEventPublisher.sendBalanceUpdate(
+        // -----------------------------------------------------
+        // CREDIT RECEIVER
+        // -----------------------------------------------------
+
+        BalanceUpdateEvent creditEvent =
                 BalanceUpdateEvent.builder()
-                        .accountNumber(request.getToAccountNumber())
+                        .eventId(creditEventId)
+                        .accountNumber(
+                                request.getToAccountNumber()
+                        )
                         .amount(request.getAmount())
                         .currency(Currency.USD)
                         .description(request.getDescription())
-                        .transactionDirection(TransactionDirection.CREDIT)
-                        .transactionType(TransactionType.TRANSFER)
-                        .transactionStatus(TransactionStatus.SUCCESS)
-                        .reference(savedTransaction.getReference())
-                        .build()
+                        .transactionDirection(
+                                TransactionDirection.CREDIT
+                        )
+                        .transactionType(
+                                TransactionType.TRANSFER
+                        )
+                        .transactionStatus(
+                                TransactionStatus.SUCCESS
+                        )
+                        .reference(
+                                savedTransaction.getReference()
+                        )
+                        .build();
+
+        log.info(
+                "OUTGOING CREDIT EVENT: eventId={}, account={}, reference={}",
+                creditEvent.getEventId(),
+                creditEvent.getAccountNumber(),
+                creditEvent.getReference()
+        );
+
+        transactionEventPublisher.sendBalanceUpdate(
+                creditEvent
         );
 
 
         return new ApiResponse<>(
                 201,
                 "Transfer Successful",
-                modelMapper.map(savedTransaction, TransactionDto.class)
+                modelMapper.map(
+                        savedTransaction,
+                        TransactionDto.class
+                )
         );
     }
 
 
+    // =========================================================
+    // WITHDRAW
+    // =========================================================
+
     @Override
-    public ApiResponse<TransactionDto> withdraw(TransactionRequest request) {
+    @Transactional
+    public ApiResponse<TransactionDto> withdraw(
+            TransactionRequest request
+    ) {
 
         AccountDto account =
-                fetchAndValidateAccount(request.getFromAccountNumber());
+                fetchAndValidateAccount(
+                        request.getFromAccountNumber()
+                );
 
+        validateAccountOwnership(account);
 
-        if (account.getAccountStatus() != AccountStatus.ACTIVE) {
+        if (account.getAccountStatus()
+                != AccountStatus.ACTIVE) {
 
             throw new BadRequestException(
                     "Inactive Account"
             );
         }
 
+        if (account.getBalance() == null) {
 
-        if (account.getBalance().compareTo(request.getAmount()) < 0) {
+            throw new BadRequestException(
+                    "Transaction Failed: Account balance is unavailable"
+            );
+        }
+
+        if (account.getBalance()
+                .compareTo(request.getAmount()) < 0) {
 
             throw new BadRequestException(
                     "Insufficient Fund"
             );
         }
 
+        Transaction withdrawal =
+                Transaction.builder()
+                        .reference(
+                                "WTH" +
+                                        UUID.randomUUID()
+                                                .toString()
+                                                .substring(0, 8)
+                        )
+                        .fromAccountNumber(
+                                request.getFromAccountNumber()
+                        )
+                        .fromBankCode("BUCHEZO")
+                        .currency(Currency.USD)
+                        .toAccountNumber("VULT")
+                        .toBankCode("BUCHEZO")
+                        .amount(request.getAmount())
+                        .channel(Channel.API)
+                        .description(request.getDescription())
+                        .transactionType(
+                                TransactionType.WITHDRAWAL
+                        )
+                        .transactionStatus(
+                                TransactionStatus.SUCCESS
+                        )
+                        .createdAt(LocalDateTime.now())
+                        .build();
 
-        Transaction withdrawalTxn = Transaction.builder()
-                .reference("WID" + UUID.randomUUID().toString().substring(0, 8))
-                .fromAccountNumber(request.getFromAccountNumber())
-                .fromBankCode("BUUCHEZO")
-                .currency(Currency.USD)
-                .toAccountNumber("VULT")
-                .toBankCode("VULT")
-                .amount(request.getAmount())
-                .channel(Channel.API)
-                .description(request.getDescription())
-
-                // Withdrawal is a WITHDRAWAL, not a TRANSFER
-                .transactionType(TransactionType.WITHDRAWAL)
-
-                .transactionStatus(TransactionStatus.SUCCESS)
-                .transactionDirection(TransactionDirection.DEBIT)
-                .createdAt(LocalDateTime.now())
-                .build();
+        Transaction savedTransaction =
+                transactionRepository.save(withdrawal);
 
 
-        Transaction savedWithdrawalTnx =
-                transactionRepository.save(withdrawalTxn);
-
-
-        // Notify account service to DEBIT the account
-        transactionEventPublisher.sendBalanceUpdate(
+        BalanceUpdateEvent withdrawalEvent =
                 BalanceUpdateEvent.builder()
-                        .accountNumber(request.getFromAccountNumber())
+                        .eventId(UUID.randomUUID())
+                        .accountNumber(
+                                request.getFromAccountNumber()
+                        )
                         .amount(request.getAmount())
                         .currency(Currency.USD)
                         .description(request.getDescription())
-                        .transactionDirection(TransactionDirection.DEBIT)
-                        .transactionType(TransactionType.WITHDRAWAL)
-                        .transactionStatus(TransactionStatus.SUCCESS)
-                        .reference(savedWithdrawalTnx.getReference())
-                        .build()
+                        .transactionDirection(
+                                TransactionDirection.DEBIT
+                        )
+                        .transactionType(
+                                TransactionType.WITHDRAWAL
+                        )
+                        .transactionStatus(
+                                TransactionStatus.SUCCESS
+                        )
+                        .reference(
+                                savedTransaction.getReference()
+                        )
+                        .build();
+
+        log.info(
+                "OUTGOING WITHDRAWAL EVENT: eventId={}, account={}, reference={}",
+                withdrawalEvent.getEventId(),
+                withdrawalEvent.getAccountNumber(),
+                withdrawalEvent.getReference()
         );
 
+        transactionEventPublisher.sendBalanceUpdate(
+                withdrawalEvent
+        );
 
         return new ApiResponse<>(
                 201,
                 "Withdrawal Successful",
                 modelMapper.map(
-                        savedWithdrawalTnx,
+                        savedTransaction,
                         TransactionDto.class
                 )
         );
     }
 
+
+    // =========================================================
+    // GET TRANSACTION BY REFERENCE
+    // =========================================================
 
     @Override
     public ApiResponse<TransactionDto> getTransactionByReference(
             String reference
     ) {
 
-        log.info("reference is: {}", reference);
-
-
-        Transaction txn =
-                transactionRepository.findByReference(reference)
-                        .orElseThrow(
-                                () -> new NotFoundException(
-                                        "Transaction Not Found"
+        Transaction transaction =
+                transactionRepository
+                        .findByReference(reference)
+                        .orElseThrow(() ->
+                                new NotFoundException(
+                                        "Transaction not found"
                                 )
                         );
 
+        validateTransactionOwnership(transaction);
 
-        TransactionDto dto =
+        return new ApiResponse<>(
+                200,
+                "Transaction found",
                 modelMapper.map(
-                        txn,
+                        transaction,
                         TransactionDto.class
-                );
-
-
-        return new ApiResponse<>(
-                201,
-                "Transaction Retrieved",
-                dto
+                )
         );
     }
 
 
-    @Override
-    public ApiResponse<List<TransactionDto>>
-    getAllTransactionHistoryOfAnAccountNumber(
-            String accountNumber
-    ) {
-
-        List<Transaction> transactionList =
-                transactionRepository.findAllByAccountNumber(
-                        accountNumber
-                );
-
-
-        log.info(
-                "transaction history count is {}",
-                (long) transactionList.size()
-        );
-
-
-        List<TransactionDto> transactionDtos =
-                transactionList.stream()
-                        .map(transaction ->
-                                mapTransactionForAccount(
-                                        transaction,
-                                        accountNumber
-                                )
-                        )
-                        .toList();
-
-
-        return new ApiResponse<>(
-                201,
-                "Transaction History Retrieved for the Account",
-                transactionDtos
-        );
-    }
-
+    // =========================================================
+    // TRANSACTION HISTORY
+    // =========================================================
 
     @Override
-    public ApiResponse<List<TransactionDto>>
-    getTransactionHistory(
+    public ApiResponse<List<TransactionDto>> getTransactionHistory(
             String accountNumber,
-            LocalDateTime start,
-            LocalDateTime end
+            LocalDateTime startDate,
+            LocalDateTime endDate
     ) {
 
-        List<Transaction> history =
-                transactionRepository.findAllAccountNumberAndDateRange(
-                        accountNumber,
-                        start,
-                        end
-                );
+        AccountDto account =
+                fetchAndValidateAccount(accountNumber);
 
-
-        List<TransactionDto> transactionDtos =
-                history.stream()
-                        .map(transaction ->
-                                mapTransactionForAccount(
-                                        transaction,
-                                        accountNumber
-                                )
-                        )
-                        .toList();
-
-
-        return new ApiResponse<>(
-                201,
-                "Transaction History Retrieved for the Account",
-                transactionDtos
-        );
-    }
-
-
-    @Override
-    public ApiResponse<List<TransactionDto>>
-    getMyTransactionHistoryByDirection(
-            String accountNumber,
-            TransactionDirection direction
-    ) {
+        validateAccountOwnership(account);
 
         List<Transaction> transactions =
-                direction.equals(TransactionDirection.DEBIT)
-                        ? transactionRepository.findByFromAccountNumber(
-                        accountNumber
-                )
-                        : transactionRepository.findByToAccountNumber(
-                        accountNumber
-                );
-
+                transactionRepository
+                        .findAllAccountNumberAndDateRange(
+                                accountNumber,
+                                startDate,
+                                endDate
+                        );
 
         List<TransactionDto> transactionDtos =
                 transactions.stream()
@@ -422,30 +511,71 @@ public class TransactionServiceImpl implements TransactionService {
                         )
                         .toList();
 
-
         return new ApiResponse<>(
-                201,
-                "Transaction History Retrieved by direction for the Account",
+                200,
+                "Transaction history retrieved successfully",
                 transactionDtos
         );
     }
 
 
-    /**
-     * Maps a transaction from the perspective of the account
-     * whose transaction history is being requested.
-     *
-     * For example:
-     *
-     * Sender:
-     * 0033143527 -> DEBIT
-     *
-     * Receiver:
-     * 0008265619 -> CREDIT
-     *
-     * This is important because a transfer is stored as one
-     * transaction containing both the sender and receiver.
-     */
+    // =========================================================
+    // TRANSACTION HISTORY BY DIRECTION
+    // =========================================================
+
+    @Override
+    public ApiResponse<List<TransactionDto>>
+    getMyTransactionHistoryByDirection(
+            String accountNumber,
+            TransactionDirection direction
+    ) {
+
+        AccountDto account =
+                fetchAndValidateAccount(accountNumber);
+
+        validateAccountOwnership(account);
+
+        List<Transaction> transactions;
+
+        if (direction == TransactionDirection.DEBIT) {
+
+            transactions =
+                    transactionRepository
+                            .findByFromAccountNumber(
+                                    accountNumber
+                            );
+
+        } else {
+
+            transactions =
+                    transactionRepository
+                            .findByToAccountNumber(
+                                    accountNumber
+                            );
+        }
+
+        List<TransactionDto> transactionDtos =
+                transactions.stream()
+                        .map(transaction ->
+                                mapTransactionForAccount(
+                                        transaction,
+                                        accountNumber
+                                )
+                        )
+                        .toList();
+
+        return new ApiResponse<>(
+                200,
+                "Transaction history retrieved successfully",
+                transactionDtos
+        );
+    }
+
+
+    // =========================================================
+    // MAP TRANSACTION FOR ACCOUNT
+    // =========================================================
+
     private TransactionDto mapTransactionForAccount(
             Transaction transaction,
             String accountNumber
@@ -456,7 +586,6 @@ public class TransactionServiceImpl implements TransactionService {
                         transaction,
                         TransactionDto.class
                 );
-
 
         if (accountNumber.equals(
                 transaction.getFromAccountNumber()
@@ -475,42 +604,224 @@ public class TransactionServiceImpl implements TransactionService {
             );
         }
 
-
         return dto;
     }
 
 
+    // =========================================================
+    // ACCOUNT VALIDATION
+    // =========================================================
+
     private AccountDto fetchAndValidateAccount(
             String accountNumber
     ) {
+
+        if (accountNumber == null ||
+                accountNumber.isBlank()) {
+
+            throw new BadRequestException(
+                    "Account number is required"
+            );
+        }
 
         ApiResponse<AccountDto> response =
                 accountFeignClient.getAccountByNumber(
                         accountNumber
                 );
 
-
         if (response == null ||
                 response.data() == null) {
 
             throw new NotFoundException(
-                    "Account " + accountNumber + "not found"
+                    "Account " +
+                            accountNumber +
+                            " not found"
             );
         }
 
-
-        AccountDto account = response.data();
-
+        AccountDto account =
+                response.data();
 
         if (account.getAccountStatus()
-                .equals(AccountStatus.CLOSED)) {
+                == AccountStatus.CLOSED) {
 
             throw new BadRequestException(
                     "Transaction Denied: Account is Closed"
             );
         }
 
-
         return account;
+    }
+
+
+    // =========================================================
+    // ACCOUNT OWNERSHIP
+    // =========================================================
+
+    private void validateAccountOwnership(
+            AccountDto account
+    ) {
+
+        Authentication authentication =
+                SecurityContextHolder
+                        .getContext()
+                        .getAuthentication();
+
+        if (authentication == null ||
+                !authentication.isAuthenticated()) {
+
+            throw new AccessDeniedException(
+                    "Authentication required"
+            );
+        }
+
+        String loggedInEmail =
+                authentication.getName();
+
+        if (account.getOwnerEmail() == null ||
+                !account.getOwnerEmail()
+                        .equalsIgnoreCase(
+                                loggedInEmail
+                        )) {
+
+            throw new AccessDeniedException(
+                    "You are not authorized to access this account"
+            );
+        }
+    }
+
+
+    // =========================================================
+    // TRANSACTION OWNERSHIP
+    // =========================================================
+
+    private void validateTransactionOwnership(
+            Transaction transaction
+    ) {
+
+        Authentication authentication =
+                SecurityContextHolder
+                        .getContext()
+                        .getAuthentication();
+
+        if (authentication == null ||
+                !authentication.isAuthenticated()) {
+
+            throw new AccessDeniedException(
+                    "Authentication required"
+            );
+        }
+
+        String loggedInEmail =
+                authentication.getName();
+
+        boolean admin =
+                authentication.getAuthorities()
+                        .stream()
+                        .map(GrantedAuthority::getAuthority)
+                        .anyMatch(authority ->
+                                authority.equals("ROLE_ADMIN")
+                                        ||
+                                        authority.equals("ADMIN")
+                        );
+
+        if (admin) {
+            return;
+        }
+
+        AccountDto fromAccount = null;
+
+        if (transaction.getFromAccountNumber() != null) {
+
+            try {
+
+                fromAccount =
+                        accountFeignClient
+                                .getAccountByNumber(
+                                        transaction
+                                                .getFromAccountNumber()
+                                )
+                                .data();
+
+            } catch (Exception ignored) {
+            }
+        }
+
+        AccountDto toAccount = null;
+
+        if (transaction.getToAccountNumber() != null &&
+                !"VULT".equals(
+                        transaction.getToAccountNumber()
+                )) {
+
+            try {
+
+                toAccount =
+                        accountFeignClient
+                                .getAccountByNumber(
+                                        transaction
+                                                .getToAccountNumber()
+                                )
+                                .data();
+
+            } catch (Exception ignored) {
+            }
+        }
+
+        boolean ownsFromAccount =
+                fromAccount != null &&
+                        loggedInEmail.equalsIgnoreCase(
+                                fromAccount.getOwnerEmail()
+                        );
+
+        boolean ownsToAccount =
+                toAccount != null &&
+                        loggedInEmail.equalsIgnoreCase(
+                                toAccount.getOwnerEmail()
+                        );
+
+        if (!ownsFromAccount && !ownsToAccount) {
+
+            throw new AccessDeniedException(
+                    "You are not authorized to access this transaction"
+            );
+        }
+    }
+
+    // =========================================================
+// ALL TRANSACTION HISTORY
+// =========================================================
+
+    @Override
+    public ApiResponse<List<TransactionDto>>
+    getAllTransactionHistoryOfAnAccountNumber(
+            String accountNumber
+    ) {
+
+        AccountDto account =
+                fetchAndValidateAccount(accountNumber);
+
+        validateAccountOwnership(account);
+
+        List<Transaction> transactions =
+                transactionRepository.findAllByAccountNumber(
+                        accountNumber
+                );
+
+        List<TransactionDto> transactionDtos =
+                transactions.stream()
+                        .map(transaction ->
+                                mapTransactionForAccount(
+                                        transaction,
+                                        accountNumber
+                                )
+                        )
+                        .toList();
+
+        return new ApiResponse<>(
+                200,
+                "All transaction history retrieved successfully",
+                transactionDtos
+        );
     }
 }

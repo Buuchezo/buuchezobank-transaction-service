@@ -55,5 +55,6 @@ public class Transaction {
     @Enumerated(EnumType.STRING)
     private Channel channel;
 
+    @Builder.Default
     private LocalDateTime createdAt = LocalDateTime.now();
 }

@@ -7,54 +7,55 @@ spring:
       - org.springframework.boot.security.autoconfigure.UserDetailsServiceAutoConfiguration
 
   datasource:
-    url: ${DB_URL_TRANSACTION} #POSTGRESQL DATABASE CONNECTION
+    url: ${DB_URL_TRANSACTION}
     username: ${DB_USERNAME}
     password: ${DB_PASSWORD}
 
   jpa:
+    open-in-view: false
     hibernate:
       ddl-auto: update
 
-    # Kafka producer configuration
   kafka:
-      # Address of the Kafka broker
-      bootstrap-servers: localhost:9092
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
 
-      producer:
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
 
-        # Convert Java String → Kafka message key
-        key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        spring.json.add.type: true
 
-        # Convert Java object → JSON
-        value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
-
-        properties:
-
-          # Include Java type information in the JSON message
-          # This helps the Kafka consumer know what type of
-          # object was sent.
-          spring.json.add.type: true
+  cloud:
+    loadbalancer:
+      cache:
+        enabled: true
+        ttl: 35s
+        capacity: 256
 
 server:
   port: 8082
 
-#Actuator config, health monitoring
 management:
   endpoints:
     web:
       exposure:
         include: health,info
 
-#Eureka
 eureka:
   client:
     register-with-eureka: true
     fetch-registry: true
     service-url:
       defaultZone: http://localhost:8761/eureka/
+
   instance:
     prefer-ip-address: true
     instance-id: ${spring.application.name}:${spring.application.instance_id:${random.value}}
 
 jwt:
   secret: ${JWT_SECRET}
+
+outbox:
+  publisher:
+    fixed-delay-ms: 1000
