@@ -17,6 +17,7 @@ import com.buuchezo.transactionservice.feign.AccountFeignClient;
 import com.buuchezo.transactionservice.kafka.dto.BalanceUpdateEvent;
 import com.buuchezo.transactionservice.kafka.service.TransactionEventPublisher;
 import com.buuchezo.transactionservice.repository.TransactionRepository;
+import com.buuchezo.transactionservice.service.TanService;
 import com.buuchezo.transactionservice.service.TransactionService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -28,11 +29,18 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.LocalDate;
+
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.time.LocalDateTime;
-import java.time.LocalTime;
 import java.util.List;
 import java.util.UUID;
+
+import static org.apache.commons.codec.digest.DigestUtils.sha256;
+
 
 @Service
 @RequiredArgsConstructor
@@ -43,6 +51,7 @@ public class TransactionServiceImpl implements TransactionService {
     private final AccountFeignClient accountFeignClient;
     private final ModelMapper modelMapper;
     private final TransactionEventPublisher transactionEventPublisher;
+    private final TanService tanService;
 
 
     // =========================================================
@@ -146,6 +155,22 @@ public class TransactionServiceImpl implements TransactionService {
             );
         }
 
+        if (request.getToAccountNumber() == null ||
+                request.getToAccountNumber().isBlank()) {
+
+            throw new BadRequestException(
+                    "To Account is Needed"
+            );
+        }
+
+        if (request.getAmount() == null ||
+                request.getAmount().signum() <= 0) {
+
+            throw new BadRequestException(
+                    "Transfer amount must be greater than zero"
+            );
+        }
+
         AccountDto sourceAccount =
                 fetchAndValidateAccount(
                         request.getFromAccountNumber()
@@ -184,9 +209,82 @@ public class TransactionServiceImpl implements TransactionService {
             );
         }
 
+        // Validate destination account.
         fetchAndValidateAccount(
                 request.getToAccountNumber()
         );
+
+        /*
+         * =========================================================
+         * AUTHENTICATED USER
+         * =========================================================
+         */
+
+        Authentication authentication =
+                SecurityContextHolder.getContext()
+                        .getAuthentication();
+
+        if (authentication == null ||
+                !authentication.isAuthenticated()) {
+
+            throw new BadRequestException(
+                    "Authenticated user is required"
+            );
+        }
+
+        String loggedInUserEmail =
+                authentication.getName();
+
+        /*
+         * =========================================================
+         * TAN TRANSACTION FINGERPRINT
+         * =========================================================
+         *
+         * The TAN is tied to:
+         *
+         * user
+         * from account
+         * destination account
+         * amount
+         * description
+         *
+         * Therefore a TAN generated for one transfer cannot
+         * authorize a modified transfer.
+         */
+
+        String transactionFingerprint =
+                createTransferFingerprint(
+                        loggedInUserEmail,
+                        request
+                );
+
+        /*
+         * =========================================================
+         * TAN VERIFICATION
+         * =========================================================
+         *
+         * This happens BEFORE:
+         *
+         * - transaction persistence
+         * - debit event
+         * - credit event
+         *
+         * If TAN verification fails, the transfer stops here.
+         */
+
+        tanService.verifyAndConsume(
+                loggedInUserEmail,
+                request.getTanChallengeId(),
+                request.getTan(),
+                "TRANSFER",
+                transactionFingerprint
+        );
+
+        /*
+         * =========================================================
+         * CREATE TRANSACTION
+         * =========================================================
+         */
 
         Transaction transferTransaction =
                 Transaction.builder()
@@ -222,28 +320,18 @@ public class TransactionServiceImpl implements TransactionService {
                         transferTransaction
                 );
 
-
         /*
+         * =========================================================
+         * DEBIT SENDER
+         * =========================================================
+         *
          * IMPORTANT:
          *
-         * A transfer creates TWO balance events.
-         *
-         * Event 1:
-         * Sender gets DEBITED.
-         *
-         * Event 2:
-         * Receiver gets CREDITED.
-         *
-         * Therefore they MUST have different event IDs.
+         * The sender and receiver must have different event IDs.
          */
 
-        UUID debitEventId = UUID.randomUUID();
-        UUID creditEventId = UUID.randomUUID();
-
-
-        // -----------------------------------------------------
-        // DEBIT SENDER
-        // -----------------------------------------------------
+        UUID debitEventId =
+                UUID.randomUUID();
 
         BalanceUpdateEvent debitEvent =
                 BalanceUpdateEvent.builder()
@@ -279,10 +367,14 @@ public class TransactionServiceImpl implements TransactionService {
                 debitEvent
         );
 
+        /*
+         * =========================================================
+         * CREDIT RECEIVER
+         * =========================================================
+         */
 
-        // -----------------------------------------------------
-        // CREDIT RECEIVER
-        // -----------------------------------------------------
+        UUID creditEventId =
+                UUID.randomUUID();
 
         BalanceUpdateEvent creditEvent =
                 BalanceUpdateEvent.builder()
@@ -318,7 +410,6 @@ public class TransactionServiceImpl implements TransactionService {
                 creditEvent
         );
 
-
         return new ApiResponse<>(
                 201,
                 "Transfer Successful",
@@ -340,10 +431,38 @@ public class TransactionServiceImpl implements TransactionService {
             TransactionRequest request
     ) {
 
+        if (request.getFromAccountNumber() == null ||
+                request.getFromAccountNumber().isBlank()) {
+
+            throw new BadRequestException(
+                    "From Account is Needed"
+            );
+        }
+
+        if (request.getAmount() == null ||
+                request.getAmount().signum() <= 0) {
+
+            throw new BadRequestException(
+                    "Withdrawal amount must be greater than zero"
+            );
+        }
+
+        /*
+         * =========================================================
+         * LOAD ACCOUNT
+         * =========================================================
+         */
+
         AccountDto account =
                 fetchAndValidateAccount(
                         request.getFromAccountNumber()
                 );
+
+        /*
+         * =========================================================
+         * ACCOUNT VALIDATION
+         * =========================================================
+         */
 
         validateAccountOwnership(account);
 
@@ -351,7 +470,7 @@ public class TransactionServiceImpl implements TransactionService {
                 != AccountStatus.ACTIVE) {
 
             throw new BadRequestException(
-                    "Inactive Account"
+                    "Transaction Failed: Your account is inactive, please contact customer support"
             );
         }
 
@@ -370,10 +489,65 @@ public class TransactionServiceImpl implements TransactionService {
             );
         }
 
-        Transaction withdrawal =
+        /*
+         * =========================================================
+         * AUTHENTICATED USER
+         * =========================================================
+         */
+
+        Authentication authentication =
+                SecurityContextHolder.getContext()
+                        .getAuthentication();
+
+        if (authentication == null ||
+                !authentication.isAuthenticated()) {
+
+            throw new BadRequestException(
+                    "Authenticated user is required"
+            );
+        }
+
+        String loggedInUserEmail =
+                authentication.getName();
+
+        /*
+         * =========================================================
+         * TAN FINGERPRINT
+         * =========================================================
+         */
+
+        String transactionFingerprint =
+                createWithdrawalFingerprint(
+                        loggedInUserEmail,
+                        request
+                );
+
+        /*
+         * =========================================================
+         * TAN VERIFICATION
+         * =========================================================
+         *
+         * TAN MUST BE VALID BEFORE WE create the withdrawal.
+         */
+
+        tanService.verifyAndConsume(
+                loggedInUserEmail,
+                request.getTanChallengeId(),
+                request.getTan(),
+                "WITHDRAWAL",
+                transactionFingerprint
+        );
+
+        /*
+         * =========================================================
+         * CREATE WITHDRAWAL TRANSACTION
+         * =========================================================
+         */
+
+        Transaction withdrawalTransaction =
                 Transaction.builder()
                         .reference(
-                                "WTH" +
+                                "WID" +
                                         UUID.randomUUID()
                                                 .toString()
                                                 .substring(0, 8)
@@ -384,7 +558,7 @@ public class TransactionServiceImpl implements TransactionService {
                         .fromBankCode("BUCHEZO")
                         .currency(Currency.USD)
                         .toAccountNumber("VULT")
-                        .toBankCode("BUCHEZO")
+                        .toBankCode("VULT")
                         .amount(request.getAmount())
                         .channel(Channel.API)
                         .description(request.getDescription())
@@ -394,16 +568,29 @@ public class TransactionServiceImpl implements TransactionService {
                         .transactionStatus(
                                 TransactionStatus.SUCCESS
                         )
+                        .transactionDirection(
+                                TransactionDirection.DEBIT
+                        )
                         .createdAt(LocalDateTime.now())
                         .build();
 
-        Transaction savedTransaction =
-                transactionRepository.save(withdrawal);
+        Transaction savedWithdrawalTransaction =
+                transactionRepository.save(
+                        withdrawalTransaction
+                );
 
+        /*
+         * =========================================================
+         * DEBIT ACCOUNT
+         * =========================================================
+         */
 
-        BalanceUpdateEvent withdrawalEvent =
+        UUID debitEventId =
+                UUID.randomUUID();
+
+        BalanceUpdateEvent debitEvent =
                 BalanceUpdateEvent.builder()
-                        .eventId(UUID.randomUUID())
+                        .eventId(debitEventId)
                         .accountNumber(
                                 request.getFromAccountNumber()
                         )
@@ -420,26 +607,27 @@ public class TransactionServiceImpl implements TransactionService {
                                 TransactionStatus.SUCCESS
                         )
                         .reference(
-                                savedTransaction.getReference()
+                                savedWithdrawalTransaction
+                                        .getReference()
                         )
                         .build();
 
         log.info(
-                "OUTGOING WITHDRAWAL EVENT: eventId={}, account={}, reference={}",
-                withdrawalEvent.getEventId(),
-                withdrawalEvent.getAccountNumber(),
-                withdrawalEvent.getReference()
+                "OUTGOING WITHDRAWAL DEBIT EVENT: eventId={}, account={}, reference={}",
+                debitEvent.getEventId(),
+                debitEvent.getAccountNumber(),
+                debitEvent.getReference()
         );
 
         transactionEventPublisher.sendBalanceUpdate(
-                withdrawalEvent
+                debitEvent
         );
 
         return new ApiResponse<>(
                 201,
                 "Withdrawal Successful",
                 modelMapper.map(
-                        savedTransaction,
+                        savedWithdrawalTransaction,
                         TransactionDto.class
                 )
         );
@@ -824,4 +1012,66 @@ public class TransactionServiceImpl implements TransactionService {
                 transactionDtos
         );
     }
+
+    private String createTransferFingerprint(
+            String email,
+            TransactionRequest request
+    ) {
+
+        String raw =
+                "TRANSFER|" +
+                        email + "|" +
+                        request.getFromAccountNumber() + "|" +
+                        request.getToAccountNumber() + "|" +
+                        request.getAmount().toPlainString() + "|" +
+                        (
+                                request.getDescription() == null
+                                        ? ""
+                                        : request.getDescription()
+                        );
+
+        return sha256(raw) ;
+    }
+    private String sha256(String value) {
+
+        try {
+
+            MessageDigest digest =
+                    MessageDigest.getInstance("SHA-256");
+
+            return HexFormat.of().formatHex(
+                    digest.digest(
+                            value.getBytes(
+                                    StandardCharsets.UTF_8
+                            )
+                    )
+            );
+
+        } catch (NoSuchAlgorithmException e) {
+
+            throw new IllegalStateException(
+                    "SHA-256 algorithm is not available",
+                    e
+            );
+        }
+    }
+    private String createWithdrawalFingerprint(
+            String email,
+            TransactionRequest request
+    ) {
+
+        String raw =
+                "WITHDRAWAL|" +
+                        email + "|" +
+                        request.getFromAccountNumber() + "|" +
+                        request.getAmount().toPlainString() + "|" +
+                        (
+                                request.getDescription() == null
+                                        ? ""
+                                        : request.getDescription()
+                        );
+
+        return sha256(raw);
+    }
+
 }

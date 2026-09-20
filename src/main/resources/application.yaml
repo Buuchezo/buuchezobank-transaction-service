@@ -59,3 +59,8 @@ jwt:
 outbox:
   publisher:
     fixed-delay-ms: 1000
+
+tan:
+  expiration-minutes: ${TAN_EXPIRATION_MINUTES:1}
+  cleanup:
+    fixed-delay-ms: ${TAN_CLEANUP_FIXED_DELAY_MS:3600000}

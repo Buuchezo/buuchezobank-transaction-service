@@ -1,8 +1,7 @@
 package com.buuchezo.transactionservice.dto;
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import com.fasterxml.jackson.annotation.JsonInclude;
 import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import lombok.*;
 
@@ -13,10 +12,12 @@ import java.math.BigDecimal;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-@JsonInclude(JsonInclude.Include.NON_NULL)
-@JsonIgnoreProperties(ignoreUnknown = true)
-public class TransactionRequest {
+public class TanChallengeRequest {
 
+    @NotBlank(message = "Operation is required")
+    private String operation;
+
+    @NotBlank(message = "From account number is required")
     private String fromAccountNumber;
 
     private String toAccountNumber;
@@ -24,12 +25,9 @@ public class TransactionRequest {
     @NotNull(message = "Amount is required")
     @DecimalMin(
             value = "0.01",
-            message = "Amount must be greater than 0"
+            message = "Amount must be greater than zero"
     )
     private BigDecimal amount;
 
     private String description;
-    private String tanChallengeId;
-
-    private String tan;
 }
