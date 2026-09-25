@@ -266,17 +266,15 @@ public class TransactionController {
                 );
 
         /*
-         * The authenticated user must own
-         * the source account.
+         * The authenticated user must have access
+         * to the source account.
+         *
+         * This supports both PERSONAL and BUSINESS
+         * account ownership.
          */
-        if (sourceAccount.getOwnerEmail() == null ||
-                !sourceAccount.getOwnerEmail()
-                        .equalsIgnoreCase(email)) {
-
-            throw new BadRequestException(
-                    "You are not authorized to perform this transaction"
-            );
-        }
+        transactionService.validateAccountAccess(
+                request.getFromAccountNumber()
+        );
 
         /*
          * Account must be active.

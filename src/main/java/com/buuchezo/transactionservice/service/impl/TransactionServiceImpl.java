@@ -1,6 +1,7 @@
 package com.buuchezo.transactionservice.service.impl;
 
 import com.buuchezo.transactionservice.dto.AccountDto;
+import com.buuchezo.transactionservice.dto.BusinessMembershipDto;
 import com.buuchezo.transactionservice.dto.ApiResponse;
 import com.buuchezo.transactionservice.dto.TransactionDto;
 import com.buuchezo.transactionservice.dto.TransactionRequest;
@@ -62,7 +63,10 @@ public class TransactionServiceImpl implements TransactionService {
     @Transactional
     public ApiResponse<TransactionDto> deposit(TransactionRequest request) {
 
-        fetchAndValidateAccount(request.getToAccountNumber());
+        AccountDto destinationAccount =
+                fetchAndValidateAccount(
+                        request.getToAccountNumber()
+                );
 
         Transaction deposit = Transaction.builder()
                 .reference(
@@ -73,7 +77,7 @@ public class TransactionServiceImpl implements TransactionService {
                 )
                 .fromAccountNumber(request.getFromAccountNumber())
                 .fromBankCode("BUCHEZO")
-                .currency(Currency.USD)
+                .currency(destinationAccount.getCurrency())
                 .toAccountNumber(request.getToAccountNumber())
                 .toBankCode("BUCHEZO")
                 .amount(request.getAmount())
@@ -98,7 +102,7 @@ public class TransactionServiceImpl implements TransactionService {
                                 request.getToAccountNumber()
                         )
                         .amount(request.getAmount())
-                        .currency(Currency.USD)
+                        .currency(destinationAccount.getCurrency())
                         .description(request.getDescription())
                         .transactionDirection(
                                 TransactionDirection.CREDIT
@@ -210,9 +214,27 @@ public class TransactionServiceImpl implements TransactionService {
         }
 
         // Validate destination account.
-        fetchAndValidateAccount(
-                request.getToAccountNumber()
-        );
+
+        AccountDto destinationAccount =
+                fetchAndValidateAccount(
+                        request.getToAccountNumber()
+                );
+
+        if (sourceAccount.getCurrency() == null ||
+                destinationAccount.getCurrency() == null) {
+
+            throw new BadRequestException(
+                    "Transaction Failed: Account currency is unavailable"
+            );
+        }
+
+        if (sourceAccount.getCurrency()
+                != destinationAccount.getCurrency()) {
+
+            throw new BadRequestException(
+                    "Currency mismatch: source and destination accounts must use the same currency"
+            );
+        }
 
         /*
          * =========================================================
@@ -298,7 +320,7 @@ public class TransactionServiceImpl implements TransactionService {
                                 request.getFromAccountNumber()
                         )
                         .fromBankCode("BUCHEZO")
-                        .currency(Currency.USD)
+                        .currency(sourceAccount.getCurrency())
                         .toAccountNumber(
                                 request.getToAccountNumber()
                         )
@@ -340,7 +362,7 @@ public class TransactionServiceImpl implements TransactionService {
                                 request.getFromAccountNumber()
                         )
                         .amount(request.getAmount())
-                        .currency(Currency.USD)
+                        .currency(sourceAccount.getCurrency())
                         .description(request.getDescription())
                         .transactionDirection(
                                 TransactionDirection.DEBIT
@@ -383,7 +405,7 @@ public class TransactionServiceImpl implements TransactionService {
                                 request.getToAccountNumber()
                         )
                         .amount(request.getAmount())
-                        .currency(Currency.USD)
+                        .currency(destinationAccount.getCurrency())
                         .description(request.getDescription())
                         .transactionDirection(
                                 TransactionDirection.CREDIT
@@ -556,7 +578,7 @@ public class TransactionServiceImpl implements TransactionService {
                                 request.getFromAccountNumber()
                         )
                         .fromBankCode("BUCHEZO")
-                        .currency(Currency.USD)
+                        .currency(account.getCurrency())
                         .toAccountNumber("VULT")
                         .toBankCode("VULT")
                         .amount(request.getAmount())
@@ -595,7 +617,7 @@ public class TransactionServiceImpl implements TransactionService {
                                 request.getFromAccountNumber()
                         )
                         .amount(request.getAmount())
-                        .currency(Currency.USD)
+                        .currency(account.getCurrency())
                         .description(request.getDescription())
                         .transactionDirection(
                                 TransactionDirection.DEBIT
@@ -842,6 +864,17 @@ public class TransactionServiceImpl implements TransactionService {
     }
 
 
+    @Override
+    public void validateAccountAccess(
+            String accountNumber
+    ) {
+
+        AccountDto account =
+                fetchAndValidateAccount(accountNumber);
+
+        validateAccountOwnership(account);
+    }
+
     // =========================================================
     // ACCOUNT OWNERSHIP
     // =========================================================
@@ -866,16 +899,70 @@ public class TransactionServiceImpl implements TransactionService {
         String loggedInEmail =
                 authentication.getName();
 
-        if (account.getOwnerEmail() == null ||
-                !account.getOwnerEmail()
-                        .equalsIgnoreCase(
-                                loggedInEmail
-                        )) {
+        /*
+         * PERSONAL ACCOUNT
+         */
+        if ("PERSONAL".equalsIgnoreCase(account.getOwnershipType())) {
 
-            throw new AccessDeniedException(
-                    "You are not authorized to access this account"
-            );
+            if (account.getOwnerEmail() == null ||
+                    !account.getOwnerEmail()
+                            .equalsIgnoreCase(loggedInEmail)) {
+
+                throw new AccessDeniedException(
+                        "You are not authorized to access this account"
+                );
+            }
+
+            return;
         }
+
+        /*
+         * BUSINESS ACCOUNT
+         */
+        if ("BUSINESS".equalsIgnoreCase(account.getOwnershipType())) {
+
+            if (account.getBusinessId() == null) {
+                throw new AccessDeniedException(
+                        "Business account is missing business information"
+                );
+            }
+
+            List<BusinessMembershipDto> memberships =
+                    accountFeignClient.getBusinessMembers(
+                            account.getBusinessId()
+                    );
+
+            boolean authorized = memberships.stream()
+                    .anyMatch(membership ->
+                            membership.isActive()
+                                    && loggedInEmail.equalsIgnoreCase(
+                                            membership.getUserEmail()
+                                    )
+                                    && (
+                                        "OWNER".equalsIgnoreCase(
+                                                membership.getRole()
+                                        )
+                                        || "ADMIN".equalsIgnoreCase(
+                                                membership.getRole()
+                                        )
+                                        || "ACCOUNTANT".equalsIgnoreCase(
+                                                membership.getRole()
+                                        )
+                                    )
+                    );
+
+            if (!authorized) {
+                throw new AccessDeniedException(
+                        "You are not authorized to access this business account"
+                );
+            }
+
+            return;
+        }
+
+        throw new AccessDeniedException(
+                "Unknown account ownership type"
+        );
     }
 
 
@@ -900,9 +987,6 @@ public class TransactionServiceImpl implements TransactionService {
             );
         }
 
-        String loggedInEmail =
-                authentication.getName();
-
         boolean admin =
                 authentication.getAuthorities()
                         .stream()
@@ -910,7 +994,7 @@ public class TransactionServiceImpl implements TransactionService {
                         .anyMatch(authority ->
                                 authority.equals("ROLE_ADMIN")
                                         ||
-                                        authority.equals("ADMIN")
+                                authority.equals("ADMIN")
                         );
 
         if (admin) {
@@ -920,17 +1004,13 @@ public class TransactionServiceImpl implements TransactionService {
         AccountDto fromAccount = null;
 
         if (transaction.getFromAccountNumber() != null) {
-
             try {
-
                 fromAccount =
                         accountFeignClient
                                 .getAccountByNumber(
-                                        transaction
-                                                .getFromAccountNumber()
+                                        transaction.getFromAccountNumber()
                                 )
                                 .data();
-
             } catch (Exception ignored) {
             }
         }
@@ -943,38 +1023,44 @@ public class TransactionServiceImpl implements TransactionService {
                 )) {
 
             try {
-
                 toAccount =
                         accountFeignClient
                                 .getAccountByNumber(
-                                        transaction
-                                                .getToAccountNumber()
+                                        transaction.getToAccountNumber()
                                 )
                                 .data();
-
             } catch (Exception ignored) {
             }
         }
 
-        boolean ownsFromAccount =
-                fromAccount != null &&
-                        loggedInEmail.equalsIgnoreCase(
-                                fromAccount.getOwnerEmail()
-                        );
+        boolean ownsFromAccount = false;
 
-        boolean ownsToAccount =
-                toAccount != null &&
-                        loggedInEmail.equalsIgnoreCase(
-                                toAccount.getOwnerEmail()
-                        );
+        if (fromAccount != null) {
+            try {
+                validateAccountOwnership(fromAccount);
+                ownsFromAccount = true;
+            } catch (AccessDeniedException ignored) {
+            }
+        }
+
+        boolean ownsToAccount = false;
+
+        if (toAccount != null) {
+            try {
+                validateAccountOwnership(toAccount);
+                ownsToAccount = true;
+            } catch (AccessDeniedException ignored) {
+            }
+        }
 
         if (!ownsFromAccount && !ownsToAccount) {
-
             throw new AccessDeniedException(
                     "You are not authorized to access this transaction"
             );
         }
     }
+
+
 
     // =========================================================
 // ALL TRANSACTION HISTORY

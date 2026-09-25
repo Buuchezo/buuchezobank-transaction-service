@@ -1,6 +1,5 @@
 package com.buuchezo.transactionservice.dto;
 
-
 import com.buuchezo.transactionservice.enums.AccountStatus;
 import com.buuchezo.transactionservice.enums.AccountType;
 import com.buuchezo.transactionservice.enums.Currency;
@@ -21,12 +20,33 @@ import java.time.LocalDateTime;
 public class AccountDto {
 
     private Long id;
-    private String accountNumber;
-    private BigDecimal balance;
-    private Currency currency;
-    private AccountType accountType;
-    private AccountStatus accountStatus;
-    private String ownerEmail;
-    private LocalDateTime createdAt;
 
+    private String accountNumber;
+
+    private BigDecimal balance;
+
+    private Currency currency;
+
+    private AccountType accountType;
+
+    private AccountStatus accountStatus;
+
+    /*
+     * Personal account ownership.
+     */
+    private String ownerEmail;
+
+    /*
+     * PERSONAL or BUSINESS.
+     */
+    private String ownershipType;
+
+    /*
+     * Business account fields.
+     */
+    private Long businessId;
+
+    private String businessName;
+
+    private LocalDateTime createdAt;
 }

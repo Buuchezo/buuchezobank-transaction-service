@@ -22,4 +22,6 @@ public interface TransactionService {
     ApiResponse<List<TransactionDto>> getTransactionHistory(String accountNumber, LocalDateTime start, LocalDateTime end);
 
     ApiResponse<List<TransactionDto>> getMyTransactionHistoryByDirection(String accountNumber, TransactionDirection direction);
+
+    void validateAccountAccess(String accountNumber);
 }
